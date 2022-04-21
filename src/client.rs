@@ -6,7 +6,7 @@ use tokio::sync::mpsc::{channel, unbounded_channel, UnboundedReceiver, Unbounded
 
 use crate::crypto;
 use crate::tun::setup_tun;
-use crate::{addresses_as_bytes, receive_message, send_message, Message, ReaderState, WriterState};
+use crate::{addresses_as_bytes, Message, MessageChan};
 
 #[derive(Debug)]
 struct Packet(Vec<u8>);
@@ -29,7 +29,7 @@ struct IceCand {
 pub struct Client {
     addr: Ipv4Addr,
     session_key: crypto::SessionKey,
-    control: TcpStream,
+    control: MessageChan<TcpStream>,
     tun: tokio_tun::Tun,
 
     channels: HashMap<
@@ -43,10 +43,6 @@ pub struct Client {
     from_agent: UnboundedReceiver<Packet>,
     local_auth_rx: UnboundedReceiver<IceAuth>,
     local_cand_rx: UnboundedReceiver<IceCand>,
-
-    reader_state: ReaderState,
-    writer_state: WriterState,
-    buf_control: Vec<u8>,
 }
 
 impl Client {
@@ -57,10 +53,10 @@ impl Client {
         remotes: Vec<Ipv4Addr>,
         stun_addr: SocketAddr,
     ) -> Self {
-        let mut reader_state = ReaderState::default();
-        let mut writer_state = WriterState::default();
-        let mut buf = vec![0u8; 4096];
-        let mut control = TcpStream::connect(server_addr).await.expect("connect");
+        let mut control = {
+            let stream = TcpStream::connect(server_addr).await.expect("connect");
+            MessageChan::new(stream)
+        };
 
         log::info!("connected");
 
@@ -77,13 +73,9 @@ impl Client {
             let seed = key.sign(&pubseed);
 
             let hello = Message::Hello { addr, seed };
-            send_message(&mut writer_state, &mut buf, &mut control, hello)
-                .await
-                .expect("send");
+            control.send(hello).await.expect("send");
 
-            let hello_reply = receive_message(&mut reader_state, &mut buf, &mut control)
-                .await
-                .expect("receive");
+            let hello_reply = control.recv().await.expect("recv");
             match hello_reply {
                 Message::Hello { seed, .. } => {
                     let seed = seed.open(&server_pubkey).expect("verify");
@@ -143,10 +135,6 @@ impl Client {
             from_agent,
             local_auth_rx,
             local_cand_rx,
-
-            reader_state,
-            writer_state,
-            buf_control: buf,
         }
     }
 
@@ -156,7 +144,7 @@ impl Client {
 
         loop {
             tokio::select! {
-                res = receive_message(&mut self.reader_state, &mut self.buf_control, &mut self.control) => {
+                res = self.control.recv() => {
                     let msg = res.expect("receive");
                     self.on_control_message(msg).await;
                 }
@@ -181,9 +169,7 @@ impl Client {
                             ufrag,
                             pwd,
                         };
-                        send_message(&mut self.writer_state, &mut self.buf_control, &mut self.control, msg)
-                            .await
-                            .expect("send");
+                        self.control.send(msg).await.expect("send");
                     }
                 }
 
@@ -194,9 +180,7 @@ impl Client {
                             dst,
                             candidate,
                         };
-                        send_message(&mut self.writer_state, &mut self.buf_control, &mut self.control, msg)
-                            .await
-                            .expect("send");
+                        self.control.send(msg).await.expect("send");
                     }
                 }
             }
@@ -266,14 +250,7 @@ impl Client {
             let aad = addresses_as_bytes(src, dst);
             let packet = self.session_key.seal(&aad, packet.to_vec()).expect("seal");
             let msg = Message::Data { src, dst, packet };
-            send_message(
-                &mut self.writer_state,
-                &mut self.buf_control,
-                &mut self.control,
-                msg,
-            )
-            .await
-            .expect("send");
+            self.control.send(msg).await.expect("send");
         }
     }
 }

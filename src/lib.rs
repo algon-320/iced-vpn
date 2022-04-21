@@ -7,9 +7,8 @@ pub mod server;
 
 use serde::{Deserialize, Serialize};
 use std::net::Ipv4Addr;
-use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Message {
@@ -41,106 +40,41 @@ pub enum Message {
     },
 }
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use futures::{SinkExt, StreamExt};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_serde::{formats::SymmetricalBincode, SymmetricallyFramed};
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-enum ReaderState {
-    ReadingSize,
-    ReadingPayload { done: usize, pending: usize },
-}
-enum WriterState {
-    WritingSize,
-    WritingPayload { done: usize, pending: usize },
+struct MessageChan<Stream>
+where
+    Stream: AsyncRead + AsyncWrite + Unpin,
+{
+    inner: SymmetricallyFramed<
+        Framed<Stream, LengthDelimitedCodec>,
+        Message,
+        SymmetricalBincode<Message>,
+    >,
 }
 
-impl Default for ReaderState {
-    fn default() -> Self {
-        ReaderState::ReadingSize
+impl<S> MessageChan<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    pub fn new(stream: S) -> Self {
+        let codec = LengthDelimitedCodec::new();
+        let length_delimited = Framed::new(stream, codec);
+        let inner = SymmetricallyFramed::new(length_delimited, SymmetricalBincode::default());
+        Self { inner }
     }
-}
-impl Default for WriterState {
-    fn default() -> Self {
-        WriterState::WritingSize
+
+    pub async fn send(&mut self, msg: Message) -> Result<()> {
+        self.inner.send(msg).await?;
+        Ok(())
     }
-}
 
-async fn receive_message<R: AsyncRead + Unpin>(
-    state: &mut ReaderState,
-    buf: &mut Vec<u8>,
-    reader: &mut R,
-) -> Result<Message> {
-    loop {
-        match state {
-            ReaderState::ReadingSize => {
-                let size = reader.read_u64().await?;
-                log::trace!("receive size = {}", size);
-                *state = ReaderState::ReadingPayload {
-                    done: 0,
-                    pending: size as usize,
-                };
-                buf.resize(size as usize, 0u8);
-            }
-
-            ReaderState::ReadingPayload {
-                mut done,
-                mut pending,
-            } => {
-                let nb = reader.read(&mut buf[done..done + pending]).await?;
-                done += nb;
-                pending -= nb;
-                log::trace!("done: {}, pending: {}", done, pending);
-                if pending == 0 {
-                    let msg = bincode::deserialize(&buf[..]).map_err(|_| Error::BrokenMessage)?;
-                    *state = ReaderState::ReadingSize;
-                    return Ok(msg);
-                } else {
-                    *state = ReaderState::ReadingPayload { done, pending };
-                }
-            }
-        }
-    }
-}
-
-async fn send_message<W: AsyncWrite + Unpin>(
-    state: &mut WriterState,
-    buf: &mut Vec<u8>,
-    writer: &mut W,
-    msg: Message,
-) -> Result<()> {
-    loop {
-        match state {
-            WriterState::WritingSize => {
-                let size = bincode::serialized_size(&msg).expect("serialize");
-                log::trace!("send size = {}", size);
-                writer.write_u64(size).await?;
-
-                buf.resize(size as usize, 0u8);
-                let mut writer = &mut buf[..];
-                bincode::serialize_into(&mut writer, &msg).expect("serialize");
-
-                *state = WriterState::WritingPayload {
-                    done: 0,
-                    pending: size as usize,
-                };
-            }
-
-            WriterState::WritingPayload {
-                mut done,
-                mut pending,
-            } => {
-                let nb = writer.write(&buf[done..done + pending]).await?;
-                done += nb;
-                pending -= nb;
-                log::trace!("done: {}, pending: {}", done, pending);
-
-                if pending == 0 {
-                    writer.flush().await?;
-                    *state = WriterState::WritingSize;
-                    return Ok(());
-                } else {
-                    *state = WriterState::WritingPayload { done, pending };
-                }
-            }
-        }
+    pub async fn recv(&mut self) -> Result<Message> {
+        let msg = self.inner.next().await.unwrap()?;
+        Ok(msg)
     }
 }
 

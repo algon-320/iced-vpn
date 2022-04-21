@@ -3,7 +3,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::crypto;
-use crate::{addresses_as_bytes, receive_message, send_message, Message, ReaderState, WriterState};
+use crate::{addresses_as_bytes, Message, MessageChan};
 
 #[derive(Debug)]
 enum InternalMessage {
@@ -21,21 +21,17 @@ type FromRouter = UnboundedReceiver<InternalMessage>;
 async fn process(
     server_key_path: &str,
     to_router: ToRouter,
-    mut control: TcpStream,
+    control: TcpStream,
     sock_addr: SocketAddr,
 ) {
     log::info!("new client on {}", sock_addr);
 
-    let mut reader_state = ReaderState::default();
-    let mut writer_state = WriterState::default();
-    let mut buf = vec![0u8; 4096];
+    let mut control = MessageChan::new(control);
 
     let server_key = crypto::StaticKeyPair::from_pkcs8(server_key_path).unwrap();
 
     let (peer_addr, mut session_key) = {
-        let msg = receive_message(&mut reader_state, &mut buf, &mut control)
-            .await
-            .expect("control receive");
+        let msg = control.recv().await.expect("control receive");
         let (addr, signed_seed) = match msg {
             Message::Hello { addr, seed } => (addr, seed),
             _ => panic!("unexpected message"),
@@ -53,9 +49,7 @@ async fn process(
             addr, // FIXME
         };
 
-        send_message(&mut writer_state, &mut buf, &mut control, reply)
-            .await
-            .expect("control send");
+        control.send(reply).await.expect("control send");
 
         (addr, session_key)
     };
@@ -78,18 +72,18 @@ async fn process(
                         let aad = addresses_as_bytes(src, dst);
                         let sealed = session_key.seal(&aad, packet).expect("seal");
                         let msg = Message::Data { src, dst, packet: sealed };
-                        send_message(&mut writer_state, &mut buf, &mut control, msg).await.expect("send");
+                        control.send(msg).await.expect("send");
                     }
 
                     InternalMessage::IceCandidate(src, dst, candidate) if dst == peer_addr => {
                         log::debug!("IceCandidate {{ {}, {}, {} }}", src, dst, candidate);
                         let msg = Message::IceCandidate { src, dst, candidate };
-                        send_message(&mut writer_state, &mut buf, &mut control, msg).await.expect("send");
+                        control.send(msg).await.expect("send");
                     }
                     InternalMessage::IceAuth(src, dst, ufrag, pwd) if dst == peer_addr => {
                         log::debug!("IceAuth {{ {}, {}, {}, {} }}", src, dst, ufrag, pwd);
                         let msg = Message::IceAuth { src, dst, ufrag, pwd };
-                        send_message(&mut writer_state, &mut buf, &mut control, msg).await.expect("send");
+                        control.send(msg).await.expect("send");
                     }
 
                     otherwise => {
@@ -98,7 +92,7 @@ async fn process(
                 }
             }
 
-            res = receive_message(&mut reader_state, &mut buf, &mut control) => {
+            res = control.recv() => {
                 match res {
                     Ok(Message::Data { src, dst, packet }) => {
                         let aad = addresses_as_bytes(src, dst);
