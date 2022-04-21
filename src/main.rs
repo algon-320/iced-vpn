@@ -18,16 +18,16 @@ enum Command {
     },
 
     Client {
-        #[structopt(parse(try_from_str = parse_socket_addr))]
-        server_addr: SocketAddr,
-
         addr: Ipv4Addr,
 
         #[structopt(short = "i", long = "tun-iface", default_value = "vpn0")]
         iface: String,
 
-        #[structopt(long = "remote")]
-        remotes: Option<Vec<Ipv4Addr>>,
+        #[structopt(long = "p2p")]
+        direct_peers: Option<Vec<Ipv4Addr>>,
+
+        #[structopt(parse(try_from_str = parse_socket_addr))]
+        server_addr: SocketAddr,
 
         #[structopt(long = "stun", default_value = "stun.l.google.com:19302", parse(try_from_str = parse_socket_addr))]
         stun_addr: SocketAddr,
@@ -43,21 +43,28 @@ async fn main() {
 
     match cmd {
         Command::Server { bind_addr } => {
-            iced_vpn::server::server_main(bind_addr).await;
+            use iced_vpn::server::Server;
+            Server::new(bind_addr).listen().await;
         }
 
         Command::Client {
-            server_addr,
             addr,
             iface,
-            remotes,
+            direct_peers,
+            server_addr,
             stun_addr,
         } => {
-            let remotes = remotes.unwrap_or_else(|| Vec::new());
+            let direct_peers = direct_peers.unwrap_or_else(|| Vec::new());
 
-            let mut client =
-                iced_vpn::client::Client::connect(server_addr, &iface, addr, remotes, stun_addr)
-                    .await;
+            use iced_vpn::client::{Client, ClientConfig};
+            let conf = ClientConfig {
+                addr,
+                ifname: iface,
+                direct_peers,
+                server_addr,
+                stun_addr,
+            };
+            let mut client = iced_vpn::client::Client::connect(config).await;
             client.process().await;
         }
     }

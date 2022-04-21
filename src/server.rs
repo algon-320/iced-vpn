@@ -2,8 +2,9 @@ use std::net::{Ipv4Addr, SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
+use crate::addresses_as_bytes;
 use crate::crypto;
-use crate::{addresses_as_bytes, Message, MessageChan};
+use crate::message::{Message, MessageChannel};
 
 #[derive(Debug)]
 enum InternalMessage {
@@ -26,7 +27,7 @@ async fn process(
 ) {
     log::info!("new client on {}", sock_addr);
 
-    let mut control = MessageChan::new(control);
+    let mut control = MessageChannel::new(control);
 
     let server_key = crypto::StaticKeyPair::from_pkcs8(server_key_path).unwrap();
 
@@ -164,7 +165,21 @@ async fn router(mut from_peer: FromPeer) {
     }
 }
 
-pub async fn server_main(bind_addr: SocketAddr) {
+pub struct Server {
+    bind_addr: SocketAddr,
+}
+
+impl Server {
+    pub fn new(bind_addr: SocketAddr) -> Self {
+        Self { bind_addr }
+    }
+
+    pub async fn listen(&self) {
+        server_main(self.bind_addr).await
+    }
+}
+
+async fn server_main(bind_addr: SocketAddr) {
     log::info!("listening on {}", bind_addr);
     let listener = TcpListener::bind(bind_addr).await.expect("bind");
 

@@ -3,10 +3,12 @@ use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{channel, unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio_tun::Tun;
 
+use crate::addresses_as_bytes;
 use crate::crypto;
+use crate::message::{Message, MessageChannel};
 use crate::tun::setup_tun;
-use crate::{addresses_as_bytes, Message, MessageChan};
 
 #[derive(Debug)]
 struct Packet(Vec<u8>);
@@ -26,11 +28,20 @@ struct IceCand {
     candidate: String,
 }
 
+pub struct ClientConfig {
+    addr: Ipv4Addr,
+    ifname: String,
+    direct_peers: Vec<Ipv4Addr>,
+
+    stun_addr: SocketAddr,
+    server_addr: SocketAddr,
+}
+
 pub struct Client {
     addr: Ipv4Addr,
     session_key: crypto::SessionKey,
-    control: MessageChan<TcpStream>,
-    tun: tokio_tun::Tun,
+    control: MessageChannel<TcpStream>,
+    tun: Tun,
 
     channels: HashMap<
         Ipv4Addr,
@@ -47,18 +58,20 @@ pub struct Client {
 
 impl Client {
     pub async fn connect(
-        server_addr: SocketAddr,
-        ifname: &str,
-        addr: Ipv4Addr,
-        remotes: Vec<Ipv4Addr>,
-        stun_addr: SocketAddr,
+        ClientConfig {
+            addr,
+            ifname,
+            direct_peers,
+            server_addr,
+            stun_addr,
+        }: ClientConfig,
     ) -> Self {
         let mut control = {
             let stream = TcpStream::connect(server_addr).await.expect("connect");
-            MessageChan::new(stream)
+            MessageChannel::new(stream)
         };
 
-        log::info!("connected");
+        log::info!("TCP connection established with {}", server_addr);
 
         // FIXME
         let netmask_bit: u8 = 24;
@@ -84,10 +97,9 @@ impl Client {
                 _ => panic!("unexpected"),
             }
         };
-
         log::info!("session key is ready");
 
-        let tun = setup_tun(ifname, addr, netmask_bit, mtu).expect("tun device");
+        let tun = setup_tun(&ifname, addr, netmask_bit, mtu).expect("tun device");
         log::info!("tun device is ready");
 
         let mut channels = HashMap::new();
@@ -96,7 +108,7 @@ impl Client {
         let (local_auth_tx, local_auth_rx) = unbounded_channel::<IceAuth>();
         let (local_cand_tx, local_cand_rx) = unbounded_channel::<IceCand>();
 
-        for remote_addr in remotes {
+        for remote_addr in direct_peers {
             let local_addr = addr;
 
             let to_control = to_control.clone();
@@ -108,7 +120,7 @@ impl Client {
             let (remote_cand_tx, remote_cand_rx) = unbounded_channel::<IceCand>();
 
             tokio::spawn(async move {
-                peer_to_peer_connection(
+                p2p_agent(
                     stun_addr,
                     local_addr,
                     remote_addr,
@@ -255,7 +267,7 @@ impl Client {
     }
 }
 
-async fn peer_to_peer_connection(
+async fn p2p_agent(
     stun_addr: SocketAddr,
     local_addr: Ipv4Addr,
     remote_addr: Ipv4Addr,
