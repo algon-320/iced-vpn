@@ -145,6 +145,19 @@ pub struct Sealed<T> {
     _phantom: std::marker::PhantomData<T>,
 }
 
+impl<T> Sealed<T> {
+    pub fn as_bytes(&self) -> &[u8] {
+        self.ciphertext.as_slice()
+    }
+
+    pub unsafe fn from_bytes(ciphertext: Vec<u8>) -> Self {
+        Self {
+            ciphertext,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
 /// A session key used for communication between a peer and the server.
 pub struct SessionKey {
     opening: aead::LessSafeKey,

@@ -9,10 +9,12 @@ case "${1:-}" in
         RUST_LOG=debug iced-vpn server -b "$server"
         ;;
     "host1")
-        RUST_LOG=debug iced-vpn client "10.20.30.1" --p2p "10.20.30.2" "$server" --stun "$stun_server"
+        # RUST_LOG=debug iced-vpn client "10.20.30.1" --p2p "10.20.30.2" "$server" --stun "$stun_server"
+        RUST_LOG=debug iced-vpn client "10.20.30.1" "$server" --stun "$stun_server"
         ;;
     "host2")
-        RUST_LOG=debug iced-vpn client "10.20.30.2" --p2p "10.20.30.1" "$server" --stun "$stun_server"
+        # RUST_LOG=debug iced-vpn client "10.20.30.2" --p2p "10.20.30.1" "$server" --stun "$stun_server"
+        RUST_LOG=debug iced-vpn client "10.20.30.2" "$server" --stun "$stun_server"
         ;;
 esac
 

@@ -1,15 +1,16 @@
+use bytes::Bytes;
 use std::net::{Ipv4Addr, SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::addresses_as_bytes;
 use crate::crypto;
-use crate::message::{Message, MessageChannel};
+use crate::message::{IceAuth, IceCand, Message, MessageChannel, SealedPacket};
 
 #[derive(Debug)]
 enum InternalMessage {
     NewPeer(Ipv4Addr, ToPeer),
-    Packet(Ipv4Addr, Ipv4Addr, Vec<u8>),
+    Packet(Ipv4Addr, Ipv4Addr, Bytes),
     IceCandidate(Ipv4Addr, Ipv4Addr, String),
     IceAuth(Ipv4Addr, Ipv4Addr, String, String),
 }
@@ -22,17 +23,17 @@ type FromRouter = UnboundedReceiver<InternalMessage>;
 async fn process(
     server_key_path: &str,
     to_router: ToRouter,
-    control: TcpStream,
+    client_conn: TcpStream,
     sock_addr: SocketAddr,
 ) {
     log::info!("new client on {}", sock_addr);
 
-    let mut control = MessageChannel::new(control);
+    let mut client_conn = MessageChannel::new(client_conn);
 
     let server_key = crypto::StaticKeyPair::from_pkcs8(server_key_path).unwrap();
 
     let (peer_addr, mut session_key) = {
-        let msg = control.recv().await.expect("control receive");
+        let msg = client_conn.recv().await.expect("client_conn receive");
         let (addr, signed_seed) = match msg {
             Message::Hello { addr, seed } => (addr, seed),
             _ => panic!("unexpected message"),
@@ -50,7 +51,7 @@ async fn process(
             addr, // FIXME
         };
 
-        control.send(reply).await.expect("control send");
+        client_conn.send(reply).await.expect("client_conn send");
 
         (addr, session_key)
     };
@@ -72,19 +73,19 @@ async fn process(
                     InternalMessage::Packet(src, dst, packet) if dst == peer_addr => {
                         let aad = addresses_as_bytes(src, dst);
                         let sealed = session_key.seal(&aad, packet).expect("seal");
-                        let msg = Message::Data { src, dst, packet: sealed };
-                        control.send(msg).await.expect("send");
+                        let msg = Message::Data(SealedPacket { src, dst, packet: sealed });
+                        client_conn.send(msg).await.expect("send");
                     }
 
                     InternalMessage::IceCandidate(src, dst, candidate) if dst == peer_addr => {
                         log::debug!("IceCandidate {{ {}, {}, {} }}", src, dst, candidate);
-                        let msg = Message::IceCandidate { src, dst, candidate };
-                        control.send(msg).await.expect("send");
+                        let msg = Message::IceCand(IceCand { src, dst, candidate });
+                        client_conn.send(msg).await.expect("send");
                     }
                     InternalMessage::IceAuth(src, dst, ufrag, pwd) if dst == peer_addr => {
                         log::debug!("IceAuth {{ {}, {}, {}, {} }}", src, dst, ufrag, pwd);
-                        let msg = Message::IceAuth { src, dst, ufrag, pwd };
-                        control.send(msg).await.expect("send");
+                        let msg = Message::IceAuth(IceAuth { src, dst, ufrag, pwd });
+                        client_conn.send(msg).await.expect("send");
                     }
 
                     otherwise => {
@@ -93,20 +94,20 @@ async fn process(
                 }
             }
 
-            res = control.recv() => {
+            res = client_conn.recv() => {
                 match res {
-                    Ok(Message::Data { src, dst, packet }) => {
+                    Ok(Message::Data(SealedPacket { src, dst, packet })) => {
                         let aad = addresses_as_bytes(src, dst);
                         let packet = session_key.unseal(&aad, packet).expect("unseal");
                         let msg = InternalMessage::Packet(src, dst, packet);
                         to_router.send(msg).expect("router dead");
                     }
 
-                    Ok(Message::IceCandidate {src, dst, candidate })  => {
+                    Ok(Message::IceCand(IceCand {src, dst, candidate }))  => {
                         let msg = InternalMessage::IceCandidate(src, dst, candidate);
                         to_router.send(msg).expect("router dead");
                     }
-                    Ok(Message::IceAuth {src, dst, ufrag, pwd })  => {
+                    Ok(Message::IceAuth(IceAuth {src, dst, ufrag, pwd }))  => {
                         let msg = InternalMessage::IceAuth(src, dst, ufrag, pwd);
                         to_router.send(msg).expect("router dead");
                     }

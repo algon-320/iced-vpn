@@ -1,6 +1,8 @@
 mod crypto;
 mod error;
+mod io;
 mod message;
+mod p2p;
 mod tun;
 
 pub mod client;

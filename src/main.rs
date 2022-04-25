@@ -34,7 +34,7 @@ enum Command {
     },
 }
 
-#[tokio::main]
+#[actix::main]
 async fn main() {
     env_logger::init();
 
@@ -64,7 +64,7 @@ async fn main() {
                 server_addr,
                 stun_addr,
             };
-            let mut client = iced_vpn::client::Client::connect(config).await;
+            let mut client = Client::connect(conf).await;
             client.process().await;
         }
     }
